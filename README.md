@@ -43,6 +43,8 @@ Usage of subhunter:
     	Number of threads for scanning (default 50)
   -timeout int
     	Timeout in seconds (default 20)
+  --json
+    	Output results in JSON format
 ```
 
 ### Demo (Added fake fingerprint for POC):
