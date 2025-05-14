@@ -15,6 +15,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,23 @@ var (
 var VulnerableResults []string
 var NotVulnerableResults []string
 var JSONResults []ResultData
+
+// NormalizeDomain removes protocol, trailing slashes, and path from domain
+func NormalizeDomain(input string) string {
+	// Ensure input has a protocol for url.Parse to work correctly
+	if !strings.HasPrefix(input, "http://") && !strings.HasPrefix(input, "https://") {
+		input = "https://" + input
+	}
+
+	u, err := url.Parse(input)
+	if err != nil {
+		// If parsing fails, return the original input
+		return input
+	}
+
+	// Return just the host part
+	return u.Hostname()
+}
 
 // User agents
 func getRandomUserAgent() string {
@@ -157,7 +175,12 @@ func ReadFile(file string) (lines []string, err error) {
 	fileScanner := bufio.NewScanner(fileHandle)
 
 	for fileScanner.Scan() {
-		lines = append(lines, fileScanner.Text())
+		line := fileScanner.Text()
+		// Normalize each domain in the file
+		normalizedDomain := NormalizeDomain(line)
+		if normalizedDomain != "" {
+			lines = append(lines, normalizedDomain)
+		}
 	}
 
 	return lines, nil
@@ -185,6 +208,11 @@ func ParseArguments() {
 	flag.BoolVar(&JSONOutput, "json", false, "Output results in JSON format")
 
 	flag.Parse()
+
+	// Normalize the single domain input if provided
+	if SingleDomain != "" {
+		SingleDomain = NormalizeDomain(SingleDomain)
+	}
 }
 
 func CNAMEExists(key string) bool {

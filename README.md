@@ -18,6 +18,7 @@ Subhunter takes a given list of subdomains and scans them to check this vulnerab
 - Uses a fork of fingerprint data from well known sources ([can-i-take-over-xyz](https://github.com/EdOverflow/can-i-take-over-xyz/blob/master/README.md))
 - Support for both single domain and bulk scanning
 - JSON output support for easy integration with other tools
+- Flexible domain input handling (accepts URLs with protocols, paths, and query parameters)
 
 ## Installation:
 
@@ -58,6 +59,11 @@ Usage of subhunter:
 ./subhunter -d example.com
 ```
 
+#### Scan a domain with protocol and path (automatically normalized):
+```
+./subhunter -d https://example.com/path
+```
+
 #### Scan multiple domains from a file:
 ```
 ./subhunter -l subdomains.txt
@@ -77,6 +83,17 @@ Usage of subhunter:
 ```
 ./subhunter -l subdomains.txt --json -o results.json
 ```
+
+### Domain Input Formats
+
+Subhunter accepts various domain formats and automatically normalizes them:
+
+- `example.com` - Basic domain
+- `https://example.com` - Domain with protocol
+- `http://example.com/path` - Domain with protocol and path
+- `https://example.com/path?query=value` - Domain with protocol, path, and query parameters
+
+All of these formats will be normalized to just the hostname (e.g., `example.com`).
 
 ### JSON Output Format:
 
