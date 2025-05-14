@@ -1,4 +1,4 @@
-module github.com/Nemesis0U/Subhunter
+module github.com/nautical/Subhunter
 
 go 1.20
 
