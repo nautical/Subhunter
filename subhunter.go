@@ -5,7 +5,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -34,6 +36,12 @@ const (
 	Blue   = "\x1b[34;1m"
 	Yellow = "\x1b[33;1m"
 )
+
+// UpdateInfo stores the last update check information
+type UpdateInfo struct {
+	LastCheck time.Time `json:"last_check"`
+	LastHash  string    `json:"last_hash"`
+}
 
 // Prints a result message with the specified color
 func PrintResult(colorCode, resultMessage string) {
@@ -76,6 +84,7 @@ var (
 	Timeout      int
 	OutputFile   string
 	JSONOutput   bool
+	ForceUpdate  bool
 )
 
 var VulnerableResults []string
@@ -115,43 +124,111 @@ func getRandomUserAgent() string {
 	return userAgents[rand.Intn(len(userAgents))]
 }
 
-func InitializeFingerprints() {
-	currentDir, err := os.Getwd()
+// getConfigDir returns the platform-specific configuration directory
+func getConfigDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(1)
+		return "", err
 	}
 
-	filePath := filepath.Join(currentDir, "fingerprint.json")
-
-	// Checks if the file exists, if not downloads it
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		fmt.Println("Downloading fingerprint.json...")
-		if err := downloadFile(filePath, "https://raw.githubusercontent.com/Nemesis0U/Subhunter/main/fingerprint.json"); err != nil {
-			fmt.Printf("Error downloading fingerprint.json: %s\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Download complete.")
-	}
-
-	raw, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(1)
-	}
-
-	err = json.Unmarshal(raw, &Fingerprints)
-	if err != nil {
-		fmt.Printf("%s", err)
-		os.Exit(1)
-	}
+	// Use .subhunter in home directory for all platforms
+	return filepath.Join(homeDir, ".subhunter"), nil
 }
 
-// Downloads a file from the URL and saves it to the local path
-func downloadFile(filepath string, url string) error {
+// getUpdateInfoPath returns the path to the update info file
+func getUpdateInfoPath(configDir string) string {
+	return filepath.Join(configDir, "update_info.json")
+}
+
+// loadUpdateInfo loads the last update check information
+func loadUpdateInfo(configDir string) (*UpdateInfo, error) {
+	infoPath := getUpdateInfoPath(configDir)
+	if _, err := os.Stat(infoPath); os.IsNotExist(err) {
+		return &UpdateInfo{}, nil
+	}
+
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read update info: %v", err)
+	}
+
+	var info UpdateInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil, fmt.Errorf("failed to parse update info: %v", err)
+	}
+
+	return &info, nil
+}
+
+// saveUpdateInfo saves the update check information
+func saveUpdateInfo(configDir string, info *UpdateInfo) error {
+	data, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update info: %v", err)
+	}
+
+	infoPath := getUpdateInfoPath(configDir)
+	if err := os.WriteFile(infoPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write update info: %v", err)
+	}
+
+	return nil
+}
+
+// getRemoteFileHash gets the SHA-256 hash of the remote file
+func getRemoteFileHash(url string) (string, error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("failed to fetch remote file: %v", err)
+	}
+	defer resp.Body.Close()
+
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read remote file: %v", err)
+	}
+
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// getLocalFileHash gets the SHA-256 hash of the local file
+func getLocalFileHash(filePath string) (string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read local file: %v", err)
+	}
+
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// shouldCheckForUpdates determines if we should check for updates
+func shouldCheckForUpdates(info *UpdateInfo, forceUpdate bool) bool {
+	if forceUpdate {
+		return true
+	}
+
+	// If we've never checked before
+	if info.LastCheck.IsZero() {
+		return true
+	}
+
+	// Check if 24 hours have passed since last check
+	return time.Since(info.LastCheck) >= 24*time.Hour
+}
+
+// downloadFingerprints downloads the fingerprint.json file
+func downloadFingerprints(filePath string) error {
+	url := "https://raw.githubusercontent.com/nautical/Subhunter/main/fingerprint.json"
+
+	if !JSONOutput {
+		fmt.Println("Downloading fingerprint.json...")
+	}
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to download fingerprint.json: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -159,14 +236,99 @@ func downloadFile(filepath string, url string) error {
 		return fmt.Errorf("HTTP request failed with status code: %d", resp.StatusCode)
 	}
 
-	out, err := os.Create(filepath)
+	out, err := os.Create(filePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create file: %v", err)
 	}
 	defer out.Close()
 
 	_, err = io.Copy(out, resp.Body)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if !JSONOutput {
+		fmt.Println("Download complete.")
+	}
+
+	return nil
+}
+
+func InitializeFingerprints() {
+	// Get configuration directory
+	configDir, err := getConfigDir()
+	if err != nil {
+		log.Fatalf("Failed to get config directory: %v", err)
+	}
+
+	// Create config directory if it doesn't exist
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		log.Fatalf("Failed to create config directory: %v", err)
+	}
+
+	fingerprintPath := filepath.Join(configDir, "fingerprint.json")
+	url := "https://raw.githubusercontent.com/nautical/Subhunter/main/fingerprint.json"
+
+	// Load update info
+	updateInfo, err := loadUpdateInfo(configDir)
+	if err != nil {
+		log.Fatalf("Failed to load update info: %v", err)
+	}
+
+	// Check if file exists
+	fileExists := false
+	if _, err := os.Stat(fingerprintPath); err == nil {
+		fileExists = true
+	}
+
+	// If file exists and we should check for updates
+	if fileExists && shouldCheckForUpdates(updateInfo, ForceUpdate) {
+		localHash, err := getLocalFileHash(fingerprintPath)
+		if err != nil {
+			log.Fatalf("Failed to get local file hash: %v", err)
+		}
+
+		remoteHash, err := getRemoteFileHash(url)
+		if err != nil {
+			// If we can't get the remote hash, use the local file
+			if !JSONOutput {
+				fmt.Printf("Warning: Failed to check for fingerprint updates: %v\n", err)
+			}
+		} else {
+			// If hashes are different or force update is true, update the file
+			if localHash != remoteHash || ForceUpdate {
+				if err := downloadFingerprints(fingerprintPath); err != nil {
+					log.Fatalf("Failed to update fingerprints: %v", err)
+				}
+				if !JSONOutput {
+					fmt.Println("Fingerprints updated successfully")
+				}
+			}
+
+			// Update the last check time and hash
+			updateInfo.LastCheck = time.Now()
+			updateInfo.LastHash = remoteHash
+			if err := saveUpdateInfo(configDir, updateInfo); err != nil {
+				log.Fatalf("Failed to save update info: %v", err)
+			}
+		}
+	} else if !fileExists {
+		// Download if file doesn't exist
+		if err := downloadFingerprints(fingerprintPath); err != nil {
+			log.Fatalf("Failed to download fingerprints: %v", err)
+		}
+	}
+
+	// Read and parse the fingerprint file
+	raw, err := os.ReadFile(fingerprintPath)
+	if err != nil {
+		log.Fatalf("Failed to read fingerprint file: %v", err)
+	}
+
+	err = json.Unmarshal(raw, &Fingerprints)
+	if err != nil {
+		log.Fatalf("Failed to parse fingerprint file: %v", err)
+	}
 }
 
 func ReadFile(file string) (lines []string, err error) {
@@ -210,6 +372,7 @@ func ParseArguments() {
 	flag.StringVar(&OutputFile, "o", "", "File to save results")
 	flag.IntVar(&Threads, "t", 50, "Number of threads for scanning")
 	flag.BoolVar(&JSONOutput, "json", false, "Output results in JSON format")
+	flag.BoolVar(&ForceUpdate, "update", false, "Force update of fingerprint data")
 
 	flag.Parse()
 
@@ -256,6 +419,7 @@ func CheckForTakeover(target string) {
 
 	// Check for CNAME record
 	cname, err := net.LookupCNAME(target)
+	hasCNAME := err == nil && cname != target+"."
 
 	// Try to connect to the host
 	_, body, errs := Get(target, Timeout)
@@ -285,7 +449,68 @@ func CheckForTakeover(target string) {
 
 	// Continue with the normal fingerprint checks if connection succeeds
 	if len(errs) == 0 {
-		// Check for fingerprint matches in the response
+		// If we have a CNAME record, check for specific CNAME-based vulnerabilities
+		if hasCNAME {
+			for _, fingerprint := range Fingerprints {
+				for _, cnamePattern := range fingerprint.Cname {
+					if strings.Contains(cname, cnamePattern) {
+						// Found a potentially vulnerable CNAME pattern
+						for _, response := range fingerprint.Response {
+							if strings.Contains(body, response) {
+								// Special handling for cloudfront
+								if fingerprint.Name == "cloudfront" {
+									_, body2, _ := Get(target, 120)
+									if strings.Contains(body2, response) {
+										resultMessage := fmt.Sprintf("%s: Possible takeover found at %s with CNAME record %s: Vulnerable", fingerprint.Name, target, cname)
+										PrintResult(Green, resultMessage)
+										VulnerableResults = append(VulnerableResults, resultMessage)
+										if JSONOutput {
+											JSONResults = append(JSONResults, ResultData{
+												Target:     target,
+												CNAME:      cname,
+												Service:    fingerprint.Name,
+												Vulnerable: true,
+												Reason:     "CNAME points to vulnerable service with matching fingerprint",
+											})
+										}
+										return
+									}
+								} else {
+									resultMessage := fmt.Sprintf("%s: Possible takeover found at %s with CNAME record %s: Vulnerable", fingerprint.Name, target, cname)
+									PrintResult(Green, resultMessage)
+									VulnerableResults = append(VulnerableResults, resultMessage)
+									if JSONOutput {
+										JSONResults = append(JSONResults, ResultData{
+											Target:     target,
+											CNAME:      cname,
+											Service:    fingerprint.Name,
+											Vulnerable: true,
+											Reason:     "CNAME points to vulnerable service with matching fingerprint",
+										})
+									}
+									return
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// If we have a CNAME but no vulnerability was found
+			resultMessage := fmt.Sprintf("Nothing found at %s with CNAME record %s: Not Vulnerable", target, cname)
+			PrintResult(Blue, resultMessage)
+			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+			if JSONOutput {
+				JSONResults = append(JSONResults, ResultData{
+					Target:     target,
+					CNAME:      cname,
+					Vulnerable: false,
+				})
+			}
+			return
+		}
+
+		// General fingerprint check for domains without specific CNAME matches
 		for _, fingerprint := range Fingerprints {
 			for _, response := range fingerprint.Response {
 				if strings.Contains(body, response) {

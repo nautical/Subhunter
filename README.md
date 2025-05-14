@@ -21,6 +21,7 @@ Subhunter takes a given list of subdomains and scans them to check this vulnerab
 - Flexible domain input handling (accepts URLs with protocols, paths, and query parameters)
 - Proper error handling for non-existent or unresolvable domains
 - Detection of potential takeover candidates (domains that resolve but have unreachable services)
+- Smart fingerprint management with automatic updates
 
 ## Installation:
 
@@ -52,6 +53,8 @@ Usage of subhunter:
     	Timeout in seconds (default 20)
   --json
     	Output results in JSON format
+  --update
+        Force update of fingerprint data
 ```
 
 ### Examples:
@@ -85,6 +88,20 @@ Usage of subhunter:
 ```
 ./subhunter -l subdomains.txt --json -o results.json
 ```
+
+#### Force update of fingerprint data:
+```
+./subhunter -d example.com --update
+```
+
+### Fingerprint Management
+
+Subhunter uses a smart fingerprint management system:
+
+1. Fingerprints are stored in `~/.subhunter/fingerprint.json`
+2. Automatic updates check for new fingerprints every 24 hours
+3. Updates only occur when the remote file has changed (verified by SHA-256 hash)
+4. Use the `--update` flag to force an immediate update
 
 ### Domain Input Formats
 
