@@ -35,8 +35,10 @@ const (
 
 // Prints a result message with the specified color
 func PrintResult(colorCode, resultMessage string) {
-	result := fmt.Sprintf("[%s+%s]%s %s%s", colorCode, Reset, colorCode, resultMessage, Reset)
-	fmt.Println(result)
+	if !JSONOutput {
+		result := fmt.Sprintf("[%s+%s]%s %s%s", colorCode, Reset, colorCode, resultMessage, Reset)
+		fmt.Println(result)
+	}
 }
 
 // Structure of fingerprint.json
@@ -45,6 +47,15 @@ type FingerprintData struct {
 	Cname       []string    `json:"cname"`
 	Fingerprint interface{} `json:"fingerprint"`
 	Response    []string    `json:"response"`
+}
+
+// Structure for JSON output
+type ResultData struct {
+	Target     string `json:"target"`
+	CNAME      string `json:"cname,omitempty"`
+	Service    string `json:"service,omitempty"`
+	Vulnerable bool   `json:"vulnerable"`
+	Error      bool   `json:"error,omitempty"`
 }
 
 var Fingerprints []FingerprintData
@@ -58,10 +69,12 @@ var (
 	Verbose    bool
 	Timeout    int
 	OutputFile string
+	JSONOutput bool
 )
 
 var VulnerableResults []string
 var NotVulnerableResults []string
+var JSONResults []ResultData
 
 // User agents
 func getRandomUserAgent() string {
@@ -167,6 +180,7 @@ func ParseArguments() {
 	flag.IntVar(&Timeout, "timeout", 20, "Timeout in seconds")
 	flag.StringVar(&OutputFile, "o", "", "File to save results")
 	flag.IntVar(&Threads, "t", 50, "Number of threads for scanning")
+	flag.BoolVar(&JSONOutput, "json", false, "Output results in JSON format")
 
 	flag.Parse()
 }
@@ -193,6 +207,13 @@ func Check(target string, TargetCNAME string) {
 						resultMessage := fmt.Sprintf("%s: Possible takeover found at %s: Vulnerable", fingerprint.Name, target)
 						PrintResult(Green, resultMessage)
 						VulnerableResults = append(VulnerableResults, resultMessage)
+						if JSONOutput {
+							JSONResults = append(JSONResults, ResultData{
+								Target:     target,
+								Service:    fingerprint.Name,
+								Vulnerable: true,
+							})
+						}
 						return
 					}
 				}
@@ -200,6 +221,12 @@ func Check(target string, TargetCNAME string) {
 			resultMessage := fmt.Sprintf("Nothing found at %s: Not Vulnerable", target)
 			PrintResult(Blue, resultMessage)
 			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+			if JSONOutput {
+				JSONResults = append(JSONResults, ResultData{
+					Target:     target,
+					Vulnerable: false,
+				})
+			}
 		} else {
 			for _, fingerprint := range Fingerprints {
 				for _, cname := range fingerprint.Cname {
@@ -212,11 +239,27 @@ func Check(target string, TargetCNAME string) {
 										resultMessage := fmt.Sprintf("%s: Possible takeover found at %s: Vulnerable", fingerprint.Name, target)
 										PrintResult(Green, resultMessage)
 										VulnerableResults = append(VulnerableResults, resultMessage)
+										if JSONOutput {
+											JSONResults = append(JSONResults, ResultData{
+												Target:     target,
+												CNAME:      TargetCNAME,
+												Service:    fingerprint.Name,
+												Vulnerable: true,
+											})
+										}
 									}
 								} else {
 									resultMessage := fmt.Sprintf("%s: Possible takeover found at %s with CNAME record %s: Vulnerable", fingerprint.Name, target, TargetCNAME)
 									PrintResult(Green, resultMessage)
 									VulnerableResults = append(VulnerableResults, resultMessage)
+									if JSONOutput {
+										JSONResults = append(JSONResults, ResultData{
+											Target:     target,
+											CNAME:      TargetCNAME,
+											Service:    fingerprint.Name,
+											Vulnerable: true,
+										})
+									}
 								}
 							}
 							return
@@ -227,6 +270,13 @@ func Check(target string, TargetCNAME string) {
 			resultMessage := fmt.Sprintf("Nothing found at %s with CNAME record %s: Not Vulnerable", target, TargetCNAME)
 			PrintResult(Blue, resultMessage)
 			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+			if JSONOutput {
+				JSONResults = append(JSONResults, ResultData{
+					Target:     target,
+					CNAME:      TargetCNAME,
+					Vulnerable: false,
+				})
+			}
 		}
 	} else {
 		if Verbose {
@@ -235,6 +285,13 @@ func Check(target string, TargetCNAME string) {
 		resultMessage := fmt.Sprintf("Failed to check %s: Error", target)
 		PrintResult(Red, resultMessage)
 		NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+		if JSONOutput {
+			JSONResults = append(JSONResults, ResultData{
+				Target:     target,
+				Vulnerable: false,
+				Error:      true,
+			})
+		}
 	}
 }
 
@@ -272,13 +329,15 @@ func main() {
 		go Checker(Host)
 	}
 
-	fmt.Println("")
-	Banner := figure.NewColorFigure("Subhunter", "", "red", true)
-	Banner.Print()
-	fmt.Println("\n\nA fast subdomain takeover tool\n")
-	fmt.Println("Created by Nemesis")
-	fmt.Printf("\nLoaded %d fingerprints for current scan\n", len(Fingerprints))
-	fmt.Println("\n-----------------------------------------------------------------------------\n")
+	if !JSONOutput {
+		fmt.Println("")
+		Banner := figure.NewColorFigure("Subhunter", "", "red", true)
+		Banner.Print()
+		fmt.Println("\n\nA fast subdomain takeover tool\n")
+		fmt.Println("Created by Nemesis")
+		fmt.Printf("\nLoaded %d fingerprints for current scan\n", len(Fingerprints))
+		fmt.Println("\n-----------------------------------------------------------------------------\n")
+	}
 
 	if HostsList == "" {
 		fmt.Printf("Subhunter: No subdomains list specified for the scan!")
@@ -320,11 +379,26 @@ func main() {
 	close(hosts)
 	processGroup.Wait()
 
-	fmt.Printf("\nSubhunter exiting...\n")
+	if !JSONOutput {
+		fmt.Printf("\nSubhunter exiting...\n")
+	}
+
+	// Output JSON results if JSON format is selected
+	if JSONOutput {
+		jsonData, err := json.MarshalIndent(JSONResults, "", "  ")
+		if err != nil {
+			log.Fatalf("Error marshaling JSON: %v", err)
+		}
+		fmt.Println(string(jsonData))
+	}
 
 	// Writes the results to the output file if provided
 	if OutputFile != "" {
-		WriteResultsToFile(OutputFile, VulnerableResults, NotVulnerableResults)
+		if JSONOutput {
+			WriteJSONResultsToFile(OutputFile, JSONResults)
+		} else {
+			WriteResultsToFile(OutputFile, VulnerableResults, NotVulnerableResults)
+		}
 	}
 }
 
@@ -352,4 +426,18 @@ func WriteResultsToFile(filename string, vulnerableResults []string, notVulnerab
 	}
 
 	fmt.Printf("Results written to %s\n", filename)
+}
+
+func WriteJSONResultsToFile(filename string, results []ResultData) {
+	jsonData, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		log.Fatalf("Error marshaling JSON: %v", err)
+	}
+
+	err = ioutil.WriteFile(filename, jsonData, 0644)
+	if err != nil {
+		log.Fatalf("Error writing JSON to file: %v", err)
+	}
+
+	fmt.Printf("JSON results written to %s\n", filename)
 }
