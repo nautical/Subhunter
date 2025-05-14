@@ -57,6 +57,7 @@ type ResultData struct {
 	Service    string `json:"service,omitempty"`
 	Vulnerable bool   `json:"vulnerable"`
 	Error      bool   `json:"error,omitempty"`
+	ErrorMsg   string `json:"error_message,omitempty"`
 }
 
 var Fingerprints []FingerprintData
@@ -331,6 +332,20 @@ var CheckedTargets = make(map[string]bool) // Declares CheckedTargets globally
 func Checker(target string) {
 	TargetCNAME, err := net.LookupCNAME(target)
 	if err != nil {
+		if Verbose {
+			log.Printf("(DNS Error) %s => %v", target, err)
+		}
+		resultMessage := fmt.Sprintf("Failed to resolve %s: DNS Error", target)
+		PrintResult(Red, resultMessage)
+		NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+		if JSONOutput {
+			JSONResults = append(JSONResults, ResultData{
+				Target:     target,
+				Vulnerable: false,
+				Error:      true,
+				ErrorMsg:   fmt.Sprintf("DNS resolution error: %v", err),
+			})
+		}
 		return
 	}
 
@@ -355,20 +370,6 @@ func main() {
 	// Initializes fingerprints before using them
 	InitializeFingerprints()
 
-	for _, Host := range Targets {
-		go Checker(Host)
-	}
-
-	if !JSONOutput {
-		fmt.Println("")
-		Banner := figure.NewColorFigure("Subhunter", "", "red", true)
-		Banner.Print()
-		fmt.Println("\n\nA fast subdomain takeover tool\n")
-		fmt.Println("Created by Nemesis")
-		fmt.Printf("\nLoaded %d fingerprints for current scan\n", len(Fingerprints))
-		fmt.Println("\n-----------------------------------------------------------------------------\n")
-	}
-
 	// Check if either a hosts list or a single domain is provided
 	if HostsList == "" && SingleDomain == "" {
 		fmt.Printf("Subhunter: No domain specified for the scan!")
@@ -389,6 +390,16 @@ func main() {
 	// Add single domain if provided
 	if SingleDomain != "" {
 		Targets = append(Targets, SingleDomain)
+	}
+
+	if !JSONOutput {
+		fmt.Println("")
+		Banner := figure.NewColorFigure("Subhunter", "", "red", true)
+		Banner.Print()
+		fmt.Println("\n\nA fast subdomain takeover tool\n")
+		fmt.Println("Created by Nemesis")
+		fmt.Printf("\nLoaded %d fingerprints for current scan\n", len(Fingerprints))
+		fmt.Println("\n-----------------------------------------------------------------------------\n")
 	}
 
 	hosts := make(chan string, Threads)

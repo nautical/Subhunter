@@ -19,6 +19,7 @@ Subhunter takes a given list of subdomains and scans them to check this vulnerab
 - Support for both single domain and bulk scanning
 - JSON output support for easy integration with other tools
 - Flexible domain input handling (accepts URLs with protocols, paths, and query parameters)
+- Proper error handling for non-existent or unresolvable domains
 
 ## Installation:
 
@@ -110,9 +111,23 @@ When using the `--json` flag, Subhunter outputs results in a structured JSON for
     "cname": "abandoned.service.com",
     "service": "Service Name",
     "vulnerable": true
+  },
+  {
+    "target": "nonexistent.example.com",
+    "vulnerable": false,
+    "error": true,
+    "error_message": "DNS resolution error: no such host"
   }
 ]
 ```
+
+The JSON output includes the following fields:
+- `target`: The domain being scanned
+- `cname`: The CNAME record (if available)
+- `service`: The service name (if identified)
+- `vulnerable`: Boolean indicating if the domain is vulnerable to takeover
+- `error`: Boolean indicating if an error occurred
+- `error_message`: Description of the error (if any)
 
 ### Demo (Added fake fingerprint for POC):
 
