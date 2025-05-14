@@ -57,6 +57,7 @@ type FingerprintData struct {
 	Cname       []string    `json:"cname"`
 	Fingerprint interface{} `json:"fingerprint"`
 	Response    []string    `json:"response"`
+	Headers     []string    `json:"headers,omitempty"`
 }
 
 // Structure for JSON output
@@ -85,6 +86,7 @@ var (
 	OutputFile   string
 	JSONOutput   bool
 	ForceUpdate  bool
+	Port         int
 )
 
 var VulnerableResults []string
@@ -353,14 +355,33 @@ func ReadFile(file string) (lines []string, err error) {
 }
 
 func Get(url string, timeout int) (resp gorequest.Response, body string, errs []error) {
-	url = fmt.Sprintf("https://%s/", url) // Uses https
-
+	// Default to HTTPS first
+	protocol := "https"
 	userAgent := getRandomUserAgent()
 
+	// Format URL with port
+	targetURL := url
+	if Port != 443 && Port != 80 {
+		targetURL = fmt.Sprintf("%s:%d", url, Port)
+	}
+
+	// Try HTTPS first
+	fullURL := fmt.Sprintf("%s://%s/", protocol, targetURL)
 	resp, body, errs = gorequest.New().TLSClientConfig(&tls.Config{InsecureSkipVerify: true}).
-		Timeout(time.Duration(timeout)*time.Second).Get(url).
-		Set("User-Agent", userAgent). // Sets random user agent
+		Timeout(time.Duration(timeout)*time.Second).Get(fullURL).
+		Set("User-Agent", userAgent).
 		End()
+
+	// If HTTPS fails with protocol error, try HTTP
+	if len(errs) > 0 && (strings.Contains(errs[0].Error(), "server gave HTTP response to HTTPS client") ||
+		strings.Contains(errs[0].Error(), "malformed HTTP response")) {
+		protocol = "http"
+		fullURL = fmt.Sprintf("%s://%s/", protocol, targetURL)
+		resp, body, errs = gorequest.New().
+			Timeout(time.Duration(timeout)*time.Second).Get(fullURL).
+			Set("User-Agent", userAgent).
+			End()
+	}
 
 	return resp, body, errs
 }
@@ -373,6 +394,7 @@ func ParseArguments() {
 	flag.IntVar(&Threads, "t", 50, "Number of threads for scanning")
 	flag.BoolVar(&JSONOutput, "json", false, "Output results in JSON format")
 	flag.BoolVar(&ForceUpdate, "update", false, "Force update of fingerprint data")
+	flag.IntVar(&Port, "p", 443, "Port number to scan (default: 443)")
 
 	flag.Parse()
 
@@ -396,72 +418,96 @@ func CNAMEExists(key string) bool {
 
 // Check DNS resolution and connection for potential takeover
 func CheckForTakeover(target string) {
-	// First check if the domain resolves to an IP address
-	ips, err := net.LookupIP(target)
-	if err != nil {
-		// DNS resolution failed - domain doesn't exist
-		if Verbose {
-			log.Printf("(DNS Error) %s => %v", target, err)
+	// Step 1: Initial DNS checks
+	cname, cnameErr := net.LookupCNAME(target)
+	hasCNAME := cnameErr == nil && cname != target+"."
+
+	ips, ipErr := net.LookupIP(target)
+	hasIP := ipErr == nil && len(ips) > 0
+
+	// Step 2: Check for dangling CNAME
+	if hasCNAME {
+		cnameTarget := strings.TrimSuffix(cname, ".")
+		_, err := net.LookupHost(cnameTarget)
+		if err != nil {
+			resultMessage := fmt.Sprintf("High risk: Dangling CNAME found - %s points to %s which doesn't resolve", target, cname)
+			PrintResult(Green, resultMessage)
+			VulnerableResults = append(VulnerableResults, resultMessage)
+			if JSONOutput {
+				JSONResults = append(JSONResults, ResultData{
+					Target:     target,
+					CNAME:      cname,
+					Vulnerable: true,
+					Reason:     "Dangling CNAME - target doesn't resolve",
+				})
+			}
+			return
 		}
-		resultMessage := fmt.Sprintf("Failed to resolve %s: DNS Error", target)
-		PrintResult(Red, resultMessage)
-		NotVulnerableResults = append(NotVulnerableResults, resultMessage)
-		if JSONOutput {
-			JSONResults = append(JSONResults, ResultData{
-				Target:     target,
-				Vulnerable: false,
-				Error:      true,
-				ErrorMsg:   fmt.Sprintf("DNS resolution error: %v", err),
-			})
+	}
+
+	// Step 3: Handle case where neither CNAME nor A record exists
+	if !hasCNAME && !hasIP {
+		if dnsErr, ok := ipErr.(*net.DNSError); ok && dnsErr.IsNotFound {
+			resultMessage := fmt.Sprintf("Notice: %s - NXDOMAIN - Domain available for registration", target)
+			PrintResult(Yellow, resultMessage)
+			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+			if JSONOutput {
+				JSONResults = append(JSONResults, ResultData{
+					Target:     target,
+					Vulnerable: false,
+					Error:      true,
+					ErrorMsg:   "NXDOMAIN - Domain not registered",
+				})
+			}
+		} else {
+			resultMessage := fmt.Sprintf("Error: Failed to resolve %s - DNS error: %v", target, ipErr)
+			PrintResult(Red, resultMessage)
+			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+			if JSONOutput {
+				JSONResults = append(JSONResults, ResultData{
+					Target:     target,
+					Vulnerable: false,
+					Error:      true,
+					ErrorMsg:   fmt.Sprintf("DNS resolution error: %v", ipErr),
+				})
+			}
 		}
 		return
 	}
 
-	// Check for CNAME record
-	cname, err := net.LookupCNAME(target)
-	hasCNAME := err == nil && cname != target+"."
+	// Step 4: Check service response
+	resp, body, errs := Get(target, Timeout)
 
-	// Try to connect to the host
-	_, body, errs := Get(target, Timeout)
-
-	// If we have connection errors but the domain resolves to an IP
-	if len(errs) > 0 && len(ips) > 0 {
-		// This is a potential takeover candidate - domain resolves but service is unreachable
-		ipStr := ips[0].String()
-		errStr := errs[0].Error()
-
-		resultMessage := fmt.Sprintf("Potential takeover candidate: %s resolves to %s but connection failed: %v", target, ipStr, errs[0])
-		PrintResult(Yellow, resultMessage)
-		VulnerableResults = append(VulnerableResults, resultMessage)
-
-		if JSONOutput {
-			JSONResults = append(JSONResults, ResultData{
-				Target:     target,
-				IP:         ipStr,
-				CNAME:      cname,
-				Vulnerable: true,
-				Reason:     "Domain resolves but service is unreachable",
-				ErrorMsg:   errStr,
-			})
-		}
-		return
-	}
-
-	// Continue with the normal fingerprint checks if connection succeeds
-	if len(errs) == 0 {
-		// If we have a CNAME record, check for specific CNAME-based vulnerabilities
-		if hasCNAME {
-			for _, fingerprint := range Fingerprints {
+	// Check for specific service patterns from fingerprints
+	if len(errs) == 0 && resp != nil {
+		for _, fingerprint := range Fingerprints {
+			// Check CNAME patterns if we have a CNAME
+			if hasCNAME {
 				for _, cnamePattern := range fingerprint.Cname {
-					if strings.Contains(cname, cnamePattern) {
-						// Found a potentially vulnerable CNAME pattern
-						for _, response := range fingerprint.Response {
-							if strings.Contains(body, response) {
-								// Special handling for cloudfront
-								if fingerprint.Name == "cloudfront" {
-									_, body2, _ := Get(target, 120)
-									if strings.Contains(body2, response) {
-										resultMessage := fmt.Sprintf("%s: Possible takeover found at %s with CNAME record %s: Vulnerable", fingerprint.Name, target, cname)
+					if strings.Contains(strings.ToLower(cname), strings.ToLower(cnamePattern)) {
+						// Found matching CNAME pattern, now check response patterns
+						switch fp := fingerprint.Fingerprint.(type) {
+						case string:
+							if strings.Contains(body, fp) {
+								resultMessage := fmt.Sprintf("%s: Potential takeover - %s with CNAME %s matches fingerprint", fingerprint.Name, target, cname)
+								PrintResult(Green, resultMessage)
+								VulnerableResults = append(VulnerableResults, resultMessage)
+								if JSONOutput {
+									JSONResults = append(JSONResults, ResultData{
+										Target:     target,
+										CNAME:      cname,
+										Service:    fingerprint.Name,
+										Vulnerable: true,
+										Reason:     "CNAME and response pattern match service fingerprint",
+									})
+								}
+								return
+							}
+						case []interface{}:
+							for _, pattern := range fp {
+								if str, ok := pattern.(string); ok {
+									if strings.Contains(body, str) {
+										resultMessage := fmt.Sprintf("%s: Potential takeover - %s with CNAME %s matches fingerprint", fingerprint.Name, target, cname)
 										PrintResult(Green, resultMessage)
 										VulnerableResults = append(VulnerableResults, resultMessage)
 										if JSONOutput {
@@ -470,25 +516,11 @@ func CheckForTakeover(target string) {
 												CNAME:      cname,
 												Service:    fingerprint.Name,
 												Vulnerable: true,
-												Reason:     "CNAME points to vulnerable service with matching fingerprint",
+												Reason:     "CNAME and response pattern match service fingerprint",
 											})
 										}
 										return
 									}
-								} else {
-									resultMessage := fmt.Sprintf("%s: Possible takeover found at %s with CNAME record %s: Vulnerable", fingerprint.Name, target, cname)
-									PrintResult(Green, resultMessage)
-									VulnerableResults = append(VulnerableResults, resultMessage)
-									if JSONOutput {
-										JSONResults = append(JSONResults, ResultData{
-											Target:     target,
-											CNAME:      cname,
-											Service:    fingerprint.Name,
-											Vulnerable: true,
-											Reason:     "CNAME points to vulnerable service with matching fingerprint",
-										})
-									}
-									return
 								}
 							}
 						}
@@ -496,50 +528,56 @@ func CheckForTakeover(target string) {
 				}
 			}
 
-			// If we have a CNAME but no vulnerability was found
-			resultMessage := fmt.Sprintf("Nothing found at %s with CNAME record %s: Not Vulnerable", target, cname)
-			PrintResult(Blue, resultMessage)
-			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
-			if JSONOutput {
-				JSONResults = append(JSONResults, ResultData{
-					Target:     target,
-					CNAME:      cname,
-					Vulnerable: false,
-				})
-			}
-			return
-		}
-
-		// General fingerprint check for domains without specific CNAME matches
-		for _, fingerprint := range Fingerprints {
-			for _, response := range fingerprint.Response {
-				if strings.Contains(body, response) {
-					resultMessage := fmt.Sprintf("%s: Possible takeover found at %s: Vulnerable", fingerprint.Name, target)
-					PrintResult(Green, resultMessage)
-					VulnerableResults = append(VulnerableResults, resultMessage)
-					if JSONOutput {
-						JSONResults = append(JSONResults, ResultData{
-							Target:     target,
-							CNAME:      cname,
-							Service:    fingerprint.Name,
-							Vulnerable: true,
-							Reason:     "Fingerprint match found",
-						})
+			// Check response patterns
+			if fingerprint.Response != nil {
+				for _, response := range fingerprint.Response {
+					if strings.Contains(body, response) {
+						resultMessage := fmt.Sprintf("%s: Potential takeover - Service fingerprint detected on %s", fingerprint.Name, target)
+						PrintResult(Green, resultMessage)
+						VulnerableResults = append(VulnerableResults, resultMessage)
+						if JSONOutput {
+							JSONResults = append(JSONResults, ResultData{
+								Target:     target,
+								IP:         ips[0].String(),
+								Service:    fingerprint.Name,
+								Vulnerable: true,
+								Reason:     "Response matches service fingerprint",
+							})
+						}
+						return
 					}
-					return
 				}
 			}
 		}
 
-		// No fingerprint match found, but connection succeeded
-		resultMessage := fmt.Sprintf("Nothing found at %s: Not Vulnerable", target)
+		// Service responds but no fingerprint matches
+		resultMessage := fmt.Sprintf("Info: %s responds on port %d - No fingerprint matches", target, Port)
 		PrintResult(Blue, resultMessage)
 		NotVulnerableResults = append(NotVulnerableResults, resultMessage)
 		if JSONOutput {
 			JSONResults = append(JSONResults, ResultData{
 				Target:     target,
-				CNAME:      cname,
+				IP:         ips[0].String(),
 				Vulnerable: false,
+				Reason:     "Service responds normally",
+			})
+		}
+	} else {
+		// Service is unreachable
+		errMsg := "unknown error"
+		if len(errs) > 0 {
+			errMsg = errs[0].Error()
+		}
+		resultMessage := fmt.Sprintf("Warning: %s is unreachable on port %d - %s", target, Port, errMsg)
+		PrintResult(Yellow, resultMessage)
+		NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+		if JSONOutput {
+			JSONResults = append(JSONResults, ResultData{
+				Target:     target,
+				IP:         ips[0].String(),
+				Vulnerable: false,
+				Error:      true,
+				ErrorMsg:   errMsg,
 			})
 		}
 	}
