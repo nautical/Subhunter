@@ -28,10 +28,11 @@ import (
 
 // ANSI Color Codes
 const (
-	Reset = "\x1b[0m"
-	Red   = "\x1b[31;1m"
-	Green = "\x1b[32;1m"
-	Blue  = "\x1b[34;1m"
+	Reset  = "\x1b[0m"
+	Red    = "\x1b[31;1m"
+	Green  = "\x1b[32;1m"
+	Blue   = "\x1b[34;1m"
+	Yellow = "\x1b[33;1m"
 )
 
 // Prints a result message with the specified color
@@ -54,10 +55,12 @@ type FingerprintData struct {
 type ResultData struct {
 	Target     string `json:"target"`
 	CNAME      string `json:"cname,omitempty"`
+	IP         string `json:"ip,omitempty"`
 	Service    string `json:"service,omitempty"`
 	Vulnerable bool   `json:"vulnerable"`
 	Error      bool   `json:"error,omitempty"`
 	ErrorMsg   string `json:"error_message,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 var Fingerprints []FingerprintData
@@ -228,110 +231,12 @@ func CNAMEExists(key string) bool {
 	return false
 }
 
-func Check(target string, TargetCNAME string) {
-	_, body, errs := Get(target, Timeout)
-	if len(errs) == 0 {
-		if TargetCNAME == "All" {
-			for _, fingerprint := range Fingerprints {
-				for _, response := range fingerprint.Response {
-					if strings.Contains(body, response) {
-						resultMessage := fmt.Sprintf("%s: Possible takeover found at %s: Vulnerable", fingerprint.Name, target)
-						PrintResult(Green, resultMessage)
-						VulnerableResults = append(VulnerableResults, resultMessage)
-						if JSONOutput {
-							JSONResults = append(JSONResults, ResultData{
-								Target:     target,
-								Service:    fingerprint.Name,
-								Vulnerable: true,
-							})
-						}
-						return
-					}
-				}
-			}
-			resultMessage := fmt.Sprintf("Nothing found at %s: Not Vulnerable", target)
-			PrintResult(Blue, resultMessage)
-			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
-			if JSONOutput {
-				JSONResults = append(JSONResults, ResultData{
-					Target:     target,
-					Vulnerable: false,
-				})
-			}
-		} else {
-			for _, fingerprint := range Fingerprints {
-				for _, cname := range fingerprint.Cname {
-					if strings.Contains(TargetCNAME, cname) {
-						for _, response := range fingerprint.Response {
-							if strings.Contains(body, response) {
-								if fingerprint.Name == "cloudfront" {
-									_, body2, _ := Get(target, 120)
-									if strings.Contains(body2, response) {
-										resultMessage := fmt.Sprintf("%s: Possible takeover found at %s: Vulnerable", fingerprint.Name, target)
-										PrintResult(Green, resultMessage)
-										VulnerableResults = append(VulnerableResults, resultMessage)
-										if JSONOutput {
-											JSONResults = append(JSONResults, ResultData{
-												Target:     target,
-												CNAME:      TargetCNAME,
-												Service:    fingerprint.Name,
-												Vulnerable: true,
-											})
-										}
-									}
-								} else {
-									resultMessage := fmt.Sprintf("%s: Possible takeover found at %s with CNAME record %s: Vulnerable", fingerprint.Name, target, TargetCNAME)
-									PrintResult(Green, resultMessage)
-									VulnerableResults = append(VulnerableResults, resultMessage)
-									if JSONOutput {
-										JSONResults = append(JSONResults, ResultData{
-											Target:     target,
-											CNAME:      TargetCNAME,
-											Service:    fingerprint.Name,
-											Vulnerable: true,
-										})
-									}
-								}
-							}
-							return
-						}
-					}
-				}
-			}
-			resultMessage := fmt.Sprintf("Nothing found at %s with CNAME record %s: Not Vulnerable", target, TargetCNAME)
-			PrintResult(Blue, resultMessage)
-			NotVulnerableResults = append(NotVulnerableResults, resultMessage)
-			if JSONOutput {
-				JSONResults = append(JSONResults, ResultData{
-					Target:     target,
-					CNAME:      TargetCNAME,
-					Vulnerable: false,
-				})
-			}
-		}
-	} else {
-		if Verbose {
-			log.Printf("(Error) Get: %s => %v", target, errs)
-		}
-		resultMessage := fmt.Sprintf("Failed to check %s: Error", target)
-		PrintResult(Red, resultMessage)
-		NotVulnerableResults = append(NotVulnerableResults, resultMessage)
-		if JSONOutput {
-			JSONResults = append(JSONResults, ResultData{
-				Target:     target,
-				Vulnerable: false,
-				Error:      true,
-			})
-		}
-	}
-}
-
-var CheckedTargetsMutex sync.Mutex         // Declares the mutex globally
-var CheckedTargets = make(map[string]bool) // Declares CheckedTargets globally
-
-func Checker(target string) {
-	TargetCNAME, err := net.LookupCNAME(target)
+// Check DNS resolution and connection for potential takeover
+func CheckForTakeover(target string) {
+	// First check if the domain resolves to an IP address
+	ips, err := net.LookupIP(target)
 	if err != nil {
+		// DNS resolution failed - domain doesn't exist
 		if Verbose {
 			log.Printf("(DNS Error) %s => %v", target, err)
 		}
@@ -349,17 +254,84 @@ func Checker(target string) {
 		return
 	}
 
-	CheckedTargetsMutex.Lock() // Locks the mutex
-	if All != true && CNAMEExists(TargetCNAME) == true {
-		if Verbose == true {
-			log.Printf("(CNAME Selected) %s => %s", target, TargetCNAME)
+	// Check for CNAME record
+	cname, err := net.LookupCNAME(target)
+
+	// Try to connect to the host
+	_, body, errs := Get(target, Timeout)
+
+	// If we have connection errors but the domain resolves to an IP
+	if len(errs) > 0 && len(ips) > 0 {
+		// This is a potential takeover candidate - domain resolves but service is unreachable
+		ipStr := ips[0].String()
+		errStr := errs[0].Error()
+
+		resultMessage := fmt.Sprintf("Potential takeover candidate: %s resolves to %s but connection failed: %v", target, ipStr, errs[0])
+		PrintResult(Yellow, resultMessage)
+		VulnerableResults = append(VulnerableResults, resultMessage)
+
+		if JSONOutput {
+			JSONResults = append(JSONResults, ResultData{
+				Target:     target,
+				IP:         ipStr,
+				CNAME:      cname,
+				Vulnerable: true,
+				Reason:     "Domain resolves but service is unreachable",
+				ErrorMsg:   errStr,
+			})
 		}
-		Check(target, TargetCNAME)
-	} else if All == true && !CheckedTargets[target] { // Checks if the target hasn't been checked already
-		CheckedTargets[target] = true // Marks the target as checked
-		Check(target, "All")
+		return
 	}
-	CheckedTargetsMutex.Unlock() // Unlocks the mutex
+
+	// Continue with the normal fingerprint checks if connection succeeds
+	if len(errs) == 0 {
+		// Check for fingerprint matches in the response
+		for _, fingerprint := range Fingerprints {
+			for _, response := range fingerprint.Response {
+				if strings.Contains(body, response) {
+					resultMessage := fmt.Sprintf("%s: Possible takeover found at %s: Vulnerable", fingerprint.Name, target)
+					PrintResult(Green, resultMessage)
+					VulnerableResults = append(VulnerableResults, resultMessage)
+					if JSONOutput {
+						JSONResults = append(JSONResults, ResultData{
+							Target:     target,
+							CNAME:      cname,
+							Service:    fingerprint.Name,
+							Vulnerable: true,
+							Reason:     "Fingerprint match found",
+						})
+					}
+					return
+				}
+			}
+		}
+
+		// No fingerprint match found, but connection succeeded
+		resultMessage := fmt.Sprintf("Nothing found at %s: Not Vulnerable", target)
+		PrintResult(Blue, resultMessage)
+		NotVulnerableResults = append(NotVulnerableResults, resultMessage)
+		if JSONOutput {
+			JSONResults = append(JSONResults, ResultData{
+				Target:     target,
+				CNAME:      cname,
+				Vulnerable: false,
+			})
+		}
+	}
+}
+
+var CheckedTargetsMutex sync.Mutex         // Declares the mutex globally
+var CheckedTargets = make(map[string]bool) // Declares CheckedTargets globally
+
+func Checker(target string) {
+	CheckedTargetsMutex.Lock()
+	if !CheckedTargets[target] {
+		CheckedTargets[target] = true
+		CheckedTargetsMutex.Unlock()
+		CheckForTakeover(target)
+	} else {
+		CheckedTargetsMutex.Unlock()
+	}
 }
 
 func main() {

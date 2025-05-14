@@ -20,6 +20,7 @@ Subhunter takes a given list of subdomains and scans them to check this vulnerab
 - JSON output support for easy integration with other tools
 - Flexible domain input handling (accepts URLs with protocols, paths, and query parameters)
 - Proper error handling for non-existent or unresolvable domains
+- Detection of potential takeover candidates (domains that resolve but have unreachable services)
 
 ## Installation:
 
@@ -96,6 +97,18 @@ Subhunter accepts various domain formats and automatically normalizes them:
 
 All of these formats will be normalized to just the hostname (e.g., `example.com`).
 
+### Detection Methods
+
+Subhunter uses multiple methods to identify potential subdomain takeover opportunities:
+
+1. **DNS Resolution Check**: Verifies if the domain resolves to an IP address or has a CNAME record.
+
+2. **Connection Test**: Attempts to connect to the domain to check if the service is responding.
+
+3. **Fingerprint Matching**: Checks the response against known patterns that indicate a vulnerable service.
+
+4. **Takeover Candidate Detection**: Identifies domains that resolve to an IP address but have connection timeouts, which are prime candidates for takeover.
+
 ### JSON Output Format:
 
 When using the `--json` flag, Subhunter outputs results in a structured JSON format:
@@ -110,7 +123,15 @@ When using the `--json` flag, Subhunter outputs results in a structured JSON for
     "target": "vulnerable.example.com",
     "cname": "abandoned.service.com",
     "service": "Service Name",
-    "vulnerable": true
+    "vulnerable": true,
+    "reason": "Fingerprint match found"
+  },
+  {
+    "target": "potential.example.com",
+    "ip": "192.168.1.1",
+    "vulnerable": true,
+    "error_message": "connection timeout",
+    "reason": "Domain resolves but service is unreachable"
   },
   {
     "target": "nonexistent.example.com",
@@ -124,10 +145,12 @@ When using the `--json` flag, Subhunter outputs results in a structured JSON for
 The JSON output includes the following fields:
 - `target`: The domain being scanned
 - `cname`: The CNAME record (if available)
+- `ip`: The IP address the domain resolves to (for potential takeover candidates)
 - `service`: The service name (if identified)
 - `vulnerable`: Boolean indicating if the domain is vulnerable to takeover
 - `error`: Boolean indicating if an error occurred
 - `error_message`: Description of the error (if any)
+- `reason`: Explanation of why the domain is considered vulnerable
 
 ### Demo (Added fake fingerprint for POC):
 
