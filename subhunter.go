@@ -63,13 +63,14 @@ var Fingerprints []FingerprintData
 var Targets []string
 
 var (
-	HostsList  string
-	Threads    int
-	All        bool
-	Verbose    bool
-	Timeout    int
-	OutputFile string
-	JSONOutput bool
+	HostsList    string
+	SingleDomain string
+	Threads      int
+	All          bool
+	Verbose      bool
+	Timeout      int
+	OutputFile   string
+	JSONOutput   bool
 )
 
 var VulnerableResults []string
@@ -177,6 +178,7 @@ func Get(url string, timeout int) (resp gorequest.Response, body string, errs []
 
 func ParseArguments() {
 	flag.StringVar(&HostsList, "l", "", "File including a list of hosts to scan")
+	flag.StringVar(&SingleDomain, "d", "", "Single domain to scan")
 	flag.IntVar(&Timeout, "timeout", 20, "Timeout in seconds")
 	flag.StringVar(&OutputFile, "o", "", "File to save results")
 	flag.IntVar(&Threads, "t", 50, "Number of threads for scanning")
@@ -339,19 +341,27 @@ func main() {
 		fmt.Println("\n-----------------------------------------------------------------------------\n")
 	}
 
-	if HostsList == "" {
-		fmt.Printf("Subhunter: No subdomains list specified for the scan!")
-		fmt.Printf("\n\nInfo: Use -h for showing the help message\n\n")
+	// Check if either a hosts list or a single domain is provided
+	if HostsList == "" && SingleDomain == "" {
+		fmt.Printf("Subhunter: No domain specified for the scan!")
+		fmt.Printf("\n\nInfo: Use -l to specify a file with domains or -d to specify a single domain\n\n")
 		os.Exit(1)
 	}
 
-	Hosts, err := ReadFile(HostsList)
-	if err != nil {
-		fmt.Printf("\nread: %s\n", err)
-		os.Exit(1)
+	// Process hosts list if provided
+	if HostsList != "" {
+		Hosts, err := ReadFile(HostsList)
+		if err != nil {
+			fmt.Printf("\nread: %s\n", err)
+			os.Exit(1)
+		}
+		Targets = append(Targets, Hosts...)
 	}
 
-	Targets = append(Targets, Hosts...)
+	// Add single domain if provided
+	if SingleDomain != "" {
+		Targets = append(Targets, SingleDomain)
+	}
 
 	hosts := make(chan string, Threads)
 	processGroup := new(sync.WaitGroup)

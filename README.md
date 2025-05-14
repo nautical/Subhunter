@@ -16,6 +16,8 @@ Subhunter takes a given list of subdomains and scans them to check this vulnerab
 - Uses random user agents
 - Built in Go
 - Uses a fork of fingerprint data from well known sources ([can-i-take-over-xyz](https://github.com/EdOverflow/can-i-take-over-xyz/blob/master/README.md))
+- Support for both single domain and bulk scanning
+- JSON output support for easy integration with other tools
 
 ## Installation:
 
@@ -35,6 +37,8 @@ Build from source:
 
 ```
 Usage of subhunter:
+  -d string
+    	Single domain to scan
   -l string
     	File including a list of hosts to scan
   -o string
@@ -45,6 +49,52 @@ Usage of subhunter:
     	Timeout in seconds (default 20)
   --json
     	Output results in JSON format
+```
+
+### Examples:
+
+#### Scan a single domain:
+```
+./subhunter -d example.com
+```
+
+#### Scan multiple domains from a file:
+```
+./subhunter -l subdomains.txt
+```
+
+#### Output results in JSON format:
+```
+./subhunter -d example.com --json
+```
+
+#### Save results to a file:
+```
+./subhunter -l subdomains.txt -o results.txt
+```
+
+#### Save results in JSON format:
+```
+./subhunter -l subdomains.txt --json -o results.json
+```
+
+### JSON Output Format:
+
+When using the `--json` flag, Subhunter outputs results in a structured JSON format:
+
+```json
+[
+  {
+    "target": "example.com",
+    "vulnerable": false
+  },
+  {
+    "target": "vulnerable.example.com",
+    "cname": "abandoned.service.com",
+    "service": "Service Name",
+    "vulnerable": true
+  }
+]
 ```
 
 ### Demo (Added fake fingerprint for POC):
